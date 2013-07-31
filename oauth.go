@@ -33,7 +33,10 @@
 package oauth
 
 import (
+	"crypto"
 	"crypto/hmac"
+	crand "crypto/rand"
+	"crypto/rsa"
 	"crypto/sha1"
 	"encoding/base64"
 	"errors"
@@ -49,8 +52,10 @@ import (
 )
 
 const (
-	OAUTH_VERSION    = "1.0"
-	SIGNATURE_METHOD = "HMAC-SHA1"
+	OAUTH_VERSION = "1.0"
+	HMAC_SHA1     = "HMAC-SHA1"
+	RSA_SHA1      = "RSA-SHA1"
+	PLAINTEXT     = "PLAINTEXT"
 
 	CALLBACK_PARAM         = "oauth_callback"
 	CONSUMER_KEY_PARAM     = "oauth_consumer_key"
@@ -143,7 +148,7 @@ type Consumer struct {
 	// Private seams for mocking dependencies when testing
 	clock          clock
 	nonceGenerator nonceGenerator
-	signer         signer
+	signer         Signer
 }
 
 // Creates a new Consumer instance.
@@ -153,8 +158,12 @@ type Consumer struct {
 // - serviceProvider:
 //   see the documentation for ServiceProvider for how to create this.
 //
+// - Signer one of PLAINTEXT | HMAC_SHA1_Signer | RSA_SHA1_Signer
+//   The former needs a public key to be instanciated.
+//
+//
 func NewConsumer(consumerKey string, consumerSecret string,
-	serviceProvider ServiceProvider) *Consumer {
+	serviceProvider ServiceProvider, signer Signer) *Consumer {
 	clock := &defaultClock{}
 	return &Consumer{
 		consumerKey:     consumerKey,
@@ -163,7 +172,7 @@ func NewConsumer(consumerKey string, consumerSecret string,
 		clock:           clock,
 		HttpClient:      &http.Client{},
 		nonceGenerator:  rand.New(rand.NewSource(clock.Seconds())),
-		signer:          &SHA1Signer{},
+		signer:          signer,
 
 		AdditionalParams:                 make(map[string]string),
 		AdditionalAuthorizationUrlParams: make(map[string]string),
@@ -307,7 +316,6 @@ func (c *Consumer) Put(url string, body string, userParams map[string]string, to
 
 func (c *Consumer) Debug(enabled bool) {
 	c.debug = enabled
-	c.signer.Debug(enabled)
 }
 
 type pair struct {
@@ -385,9 +393,9 @@ type nonceGenerator interface {
 	Int63() int64
 }
 
-type signer interface {
+type Signer interface {
 	Sign(message, key string) string
-	Debug(enabled bool)
+	MethodName() string
 }
 
 type defaultClock struct{}
@@ -435,7 +443,7 @@ func parseTokenAndSecret(data string) (string, string, error) {
 func (c *Consumer) baseParams(consumerKey string, additionalParams map[string]string) *OrderedParams {
 	params := NewOrderedParams()
 	params.Add(VERSION_PARAM, OAUTH_VERSION)
-	params.Add(SIGNATURE_METHOD_PARAM, SIGNATURE_METHOD)
+	params.Add(SIGNATURE_METHOD_PARAM, c.signer.MethodName())
 	params.Add(TIMESTAMP_PARAM, strconv.FormatInt(c.clock.Seconds(), 10))
 	params.Add(NONCE_PARAM, strconv.FormatInt(c.nonceGenerator.Int63(), 10))
 	params.Add(CONSUMER_KEY_PARAM, consumerKey)
@@ -445,19 +453,9 @@ func (c *Consumer) baseParams(consumerKey string, additionalParams map[string]st
 	return params
 }
 
-type SHA1Signer struct {
-	debug bool
-}
+type HMAC_SHA1_Signer struct{}
 
-func (s *SHA1Signer) Debug(enabled bool) {
-	s.debug = enabled
-}
-
-func (s *SHA1Signer) Sign(message string, key string) string {
-	if s.debug {
-		fmt.Println("Signing:" + message)
-		fmt.Println("Key:" + key)
-	}
+func (s *HMAC_SHA1_Signer) Sign(message string, key string) string {
 	hashfun := hmac.New(sha1.New, []byte(key))
 	hashfun.Write([]byte(message))
 	rawsignature := hashfun.Sum(nil)
@@ -465,6 +463,36 @@ func (s *SHA1Signer) Sign(message string, key string) string {
 	base64.StdEncoding.Encode(base64signature, rawsignature)
 	return string(base64signature)
 }
+func (s *HMAC_SHA1_Signer) MethodName() string { return HMAC_SHA1 }
+
+//Signer for the RSA-SHA1 format
+type RSA_SHA1_Signer struct {
+	Private *rsa.PrivateKey
+}
+
+func (s *RSA_SHA1_Signer) Sign(message string, key string) string {
+	//key is ignored in rsa_sha1
+	hashfun := sha1.New()
+	hashfun.Write([]byte(message))
+	hashed := hashfun.Sum(nil)
+
+	rawsignature, err := rsa.SignPKCS1v15(crand.Reader, s.Private, crypto.SHA1, hashed)
+	if err != nil {
+		panic(err)
+	}
+	return base64.StdEncoding.EncodeToString(rawsignature)
+}
+func (s *RSA_SHA1_Signer) MethodName() string { return RSA_SHA1 }
+
+//Signer for the PLAINTEXT  format
+type PLAINTEXT_Signer struct {
+	Private *rsa.PrivateKey
+}
+
+func (s *PLAINTEXT_Signer) Sign(message string, key string) string {
+	return key
+}
+func (s *PLAINTEXT_Signer) MethodName() string { return PLAINTEXT }
 
 func escape(s string) string {
 	t := make([]byte, 0, 3*len(s))

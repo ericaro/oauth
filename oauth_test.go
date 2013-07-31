@@ -372,7 +372,8 @@ func basicConsumer() *Consumer {
 			RequestTokenUrl:   "http://www.mrjon.es/requesttoken",
 			AuthorizeTokenUrl: "http://www.mrjon.es/authorizetoken",
 			AccessTokenUrl:    "http://www.mrjon.es/accesstoken",
-		})
+		},
+		&HMAC_SHA1_Signer{})
 }
 
 func assertEq(t *testing.T, expected interface{}, actual interface{}) {
@@ -543,5 +544,4 @@ func (m *MockSigner) Sign(message string, key string) string {
 	m.SignedString = message
 	return "MOCK_SIGNATURE"
 }
-
-func (m *MockSigner) Debug(enabled bool) {}
+func (m *MockSigner) MethodName() string { return HMAC_SHA1 }
